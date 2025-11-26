@@ -1,0 +1,188 @@
+name: Build AI Layer
+
+on:
+  push:
+    paths:
+      - 'model/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/executorch-arm-container
+
+jobs:
+  check-docker-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image-exists: ${{ steps.check.outputs.exists }}
+      repo-slug: ${{ steps.slug.outputs.repo_slug }}
+    steps:
+      - name: Derive lowercase repo slug
+        id: slug
+        run: echo "repo_slug=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+      - name: Check if Docker image exists
+        id: check
+        run: |
+          if docker manifest inspect ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/executorch-arm-container:latest > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-docker-if-needed:
+    needs: check-docker-image
+    if: needs.check-docker-image.outputs.image-exists == 'false'
+    uses: ./.github/workflows/build_docker.yml
+    permissions:
+      contents: read      # must be >= permissions requested by called workflow
+      packages: write
+      id-token: write
+      # attestations: write  # uncomment if attestation step in called workflow is enabled
+    secrets: inherit
+
+  build-ai-layer:
+    needs: [check-docker-image, build-docker-if-needed]
+    if: always() && (needs.check-docker-image.outputs.image-exists == 'true' || needs.build-docker-if-needed.result == 'success')
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ needs.check-docker-image.outputs.repo-slug }}/executorch-arm-container:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    env:
+      GIT_AUTHOR_EMAIL: "action@github.com"
+      GIT_AUTHOR_NAME: "GitHub Action"
+      GIT_COMMITTER_EMAIL: "action@github.com"
+      GIT_COMMITTER_NAME: "GitHub Action"
+
+    steps:
+    - name: Export lowercase repo slug env
+      run: echo "REPO_SLUG=${{ needs.check-docker-image.outputs.repo-slug }}" >> $GITHUB_ENV
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Debug mount 
+      run: tree /workspace/executorch/examples/arm 
+
+    - name: Setup git config and logging
+      run: |
+        git config --global --add safe.directory /github/workspace
+        # Setup logging directory
+        mkdir -p $GITHUB_WORKSPACE/ai_layer/logs
+        export BUILD_TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+        echo "BUILD_TIMESTAMP=$BUILD_TIMESTAMP" >> $GITHUB_ENV
+        echo "LOG_DIR=$GITHUB_WORKSPACE/ai_layer/logs" >> $GITHUB_ENV
+        echo "MAIN_LOG=$GITHUB_WORKSPACE/ai_layer/logs/build_${BUILD_TIMESTAMP}.log" >> $GITHUB_ENV
+        
+        # Log build start
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] ExecuTorch AI Layer Build Started (GitHub Actions)" | tee $GITHUB_WORKSPACE/ai_layer/logs/build_${BUILD_TIMESTAMP}.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Timestamp: $BUILD_TIMESTAMP" | tee -a $GITHUB_WORKSPACE/ai_layer/logs/build_${BUILD_TIMESTAMP}.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Workflow: ${{ github.workflow }}" | tee -a $GITHUB_WORKSPACE/ai_layer/logs/build_${BUILD_TIMESTAMP}.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Run ID: ${{ github.run_id }}" | tee -a $GITHUB_WORKSPACE/ai_layer/logs/build_${BUILD_TIMESTAMP}.log
+
+    - name: Convert and build model
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Model conversion" | tee -a $MAIN_LOG
+        cd $GITHUB_WORKSPACE/model && python3 aot_model.py 2>&1 | tee $LOG_DIR/model_conversion_$BUILD_TIMESTAMP.log $MAIN_LOG
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Model conversion" | tee -a $MAIN_LOG 
+
+    - name: Build ExecuTorch Core Libraries
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Stage1 build" | tee -a $MAIN_LOG
+        $GITHUB_WORKSPACE/scripts/build_stage1.sh /workspace/executorch \
+                               $GITHUB_WORKSPACE/out/stage1  \
+                               $GITHUB_WORKSPACE/model/arm-none-eabi-gcc.cmake 2>&1 | tee $LOG_DIR/stage1_build_$BUILD_TIMESTAMP.log $MAIN_LOG
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Stage1 build" | tee -a $MAIN_LOG
+
+    - name: Build ExecuTorch Selective Kernel Libraries
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Stage2 build" | tee -a $MAIN_LOG
+        $GITHUB_WORKSPACE/scripts/build_stage2_selective.sh \
+                               /workspace/executorch \
+                               "" \
+                               $GITHUB_WORKSPACE/out/stage2 \
+                               $GITHUB_WORKSPACE/model/arm-none-eabi-gcc.cmake \
+                               $GITHUB_WORKSPACE/model/operators_minimal.txt 2>&1 | tee $LOG_DIR/stage2_build_$BUILD_TIMESTAMP.log $MAIN_LOG
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Stage2 build" | tee -a $MAIN_LOG
+
+    - name: Collect artifacts
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Package artifacts" | tee -a $MAIN_LOG
+        cd "$GITHUB_WORKSPACE" && ./scripts/package_sdk.sh \
+          "$GITHUB_WORKSPACE/out/stage1/assets" \
+          "$GITHUB_WORKSPACE/out/stage2/assets" \
+          "$GITHUB_WORKSPACE/model/ethos_u_minimal_example.pte" \
+          "$GITHUB_WORKSPACE/ai_layer/engine" 2>&1 | tee $LOG_DIR/package_artifacts_$BUILD_TIMESTAMP.log $MAIN_LOG
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Package artifacts" | tee -a $MAIN_LOG
+
+    - name: Convert the model to a header file
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Model to header conversion" | tee -a $MAIN_LOG
+        cd "$GITHUB_WORKSPACE" && python3 scripts/pte_to_header.py -p model/ethos_u_minimal_example.pte -d ai_layer/model -o model_pte.h 2>&1 | tee $LOG_DIR/model_to_header_$BUILD_TIMESTAMP.log $MAIN_LOG
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Model to header conversion" | tee -a $MAIN_LOG
+
+    - name: Generate AI layer report
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Starting: Generate report" | tee -a $MAIN_LOG
+        python3 scripts/generate_ai_layer_report.py 2>&1 | tee $LOG_DIR/generate_report_$BUILD_TIMESTAMP.log $MAIN_LOG || { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] Report generation failed" | tee -a $MAIN_LOG; exit 1; }
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Completed: Generate report" | tee -a $MAIN_LOG
+
+    - name: Show report summary and finalize logs
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Build summary:" | tee -a $MAIN_LOG
+        head -n 50 ai_layer/REPORT.md | tee -a $MAIN_LOG || echo "Report could not be displayed" | tee -a $MAIN_LOG
+        
+        # Create build summary
+        cat > $LOG_DIR/build_summary_$BUILD_TIMESTAMP.txt << EOF
+        ExecuTorch AI Layer Build Summary (GitHub Actions)
+        ==================================================
+        Build Timestamp: $BUILD_TIMESTAMP
+        Workflow: ${{ github.workflow }}
+        Run ID: ${{ github.run_id }}
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref }}
+        Build Status: SUCCESS
+        
+        Log Files Generated:
+        - Main build log: ai_layer/logs/build_$BUILD_TIMESTAMP.log
+        - Model conversion: ai_layer/logs/model_conversion_$BUILD_TIMESTAMP.log
+        - Stage1 build: ai_layer/logs/stage1_build_$BUILD_TIMESTAMP.log  
+        - Stage2 build: ai_layer/logs/stage2_build_$BUILD_TIMESTAMP.log
+        - Package artifacts: ai_layer/logs/package_artifacts_$BUILD_TIMESTAMP.log
+        - Model to header: ai_layer/logs/model_to_header_$BUILD_TIMESTAMP.log
+        - Generate report: ai_layer/logs/generate_report_$BUILD_TIMESTAMP.log
+        
+        Outputs Generated:
+        - AI Layer libraries: ai_layer/engine/lib/
+        - AI Layer headers: ai_layer/engine/include/
+        - Model header: ai_layer/model/model_pte.h
+        - Build report: ai_layer/REPORT.md
+        EOF
+        
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] Build completed successfully!" | tee -a $MAIN_LOG
+        echo "📋 Build logs saved to: ai_layer/logs/" | tee -a $MAIN_LOG
+
+    - name: Commit changes including logs
+      run: |
+        git add ai_layer/
+        git diff --staged --quiet || git commit -m "Update AI layer with new model build - Build $BUILD_TIMESTAMP
+
+        Build artifacts and logs included:
+        - Libraries: ai_layer/engine/lib/
+        - Headers: ai_layer/engine/include/  
+        - Model: ai_layer/model/
+        - Report: ai_layer/REPORT.md
+        - Build logs: ai_layer/logs/
+
+        Workflow run: ${{ github.run_id }}
+        Commit: ${{ github.sha }}"
+        git push
