@@ -70,9 +70,6 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Debug mount 
-      run: tree /workspace/executorch/examples/arm 
-
     - name: Setup git config and logging
       run: |
         git config --global --add safe.directory /github/workspace
