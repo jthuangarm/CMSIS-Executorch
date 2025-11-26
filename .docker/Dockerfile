@@ -71,7 +71,7 @@ RUN git clone https://github.com/pytorch/executorch.git && \
     git submodule update --init --recursive
 
 RUN python -m venv executorch-venv
-ENV PATH="/workspace/executorch/examples/arm/ethos-u-scratch/arm-gnu-toolchain-13.3.rel1-aarch64-arm-none-eabi/bin:/workspace/executorch-venv/bin:$PATH"
+ENV PATH="/workspace/executorch/examples/arm/ethos-u-scratch/arm-gnu-toolchain-13.3.rel1-arm-none-eabi/bin:/workspace/executorch-venv/bin:$PATH"
 
 # Use ExecuTorch's official installation script but avoid ATen bridge conflicts
 RUN pip install --extra-index-url https://download.pytorch.org/whl/test/cpu --break-system-packages \
@@ -84,6 +84,16 @@ RUN pip install --extra-index-url https://download.pytorch.org/whl/test/cpu --br
 # Setup ARM environment using official script
 WORKDIR /workspace/executorch
 RUN ./examples/arm/setup.sh --i-agree-to-the-contained-eula
+
+# Rename architecture-specific toolchain folder to neutral name for multi-arch host-support
+RUN cd examples/arm/ethos-u-scratch && \
+    TOOLCHAIN_DIR=$(ls -d arm-gnu-toolchain-13.3.rel1-*-arm-none-eabi 2>/dev/null | head -1) && \
+    if [ -n "$TOOLCHAIN_DIR" ] && [ "$TOOLCHAIN_DIR" != "arm-gnu-toolchain-13.3.rel1-arm-none-eabi" ]; then \
+        echo "Renaming $TOOLCHAIN_DIR to arm-gnu-toolchain-13.3.rel1-arm-none-eabi" && \
+        mv "$TOOLCHAIN_DIR" arm-gnu-toolchain-13.3.rel1-arm-none-eabi; \
+    else \
+        echo "Toolchain already has neutral name or not found"; \
+    fi
 
 # Test if ARM setup worked correctly
 RUN if [ -f "examples/arm/ethos-u-setup/arm-none-eabi-gcc.cmake" ]; then \
