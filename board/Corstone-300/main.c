@@ -19,7 +19,7 @@
 #include "RTE_Components.h"
 #include  CMSIS_device_header
 
-#include "log_macros.h"
+#include "stdio.h"
 #include "uart_stdout.h"
 
 #include "main.h"
@@ -70,7 +70,7 @@ static void arm_ethosu_npu_irq_init(void) {
   /* Enable the IRQ */
   NVIC_EnableIRQ(ethosu_irqnum);
 
-  debug("EthosU IRQ#: %u, Handler: 0x%p\n", ethosu_irqnum, arm_ethosu_npu_irq_handler);
+  printf("EthosU IRQ#: %u, Handler: 0x%p\n", ethosu_irqnum, arm_ethosu_npu_irq_handler);
 }
 
 /** @brief  Initialises the NPU */
@@ -88,7 +88,7 @@ static int arm_ethosu_npu_init(void)
   void* const ethosu_base_address = (void*)(NPU0_APB_BASE_S);
 #endif
 
-  debug("Cache arena: 0x%p\n", get_cache_arena());
+  printf("Cache arena: 0x%p\n", get_cache_arena());
 
   if (0 != (err = ethosu_init(&ethosu_drv,  /* Ethos-U driver device pointer */
                   ethosu_base_address,      /* Ethos-U NPU's base address. */
@@ -97,11 +97,11 @@ static int arm_ethosu_npu_init(void)
                   1,                        /* Security enable. */
                   1)))                      /* Privilege enable. */
   {
-      printf_err("failed to initialise Ethos-U device\n");
+      printf("failed to initialise Ethos-U device\n");
       return err;
   }
 
-  info("Ethos-U device initialised\n");
+  printf("Ethos-U device initialised\n");
 
   /* Get Ethos-U version */
   struct ethosu_driver_version driver_version;
@@ -110,17 +110,17 @@ static int arm_ethosu_npu_init(void)
   ethosu_get_driver_version(&driver_version);
   ethosu_get_hw_info(&ethosu_drv, &hw_info);
 
-  info("Ethos-U version info:\n");
-  info("\tArch:       v%u.%u.%u\n",
+  printf("Ethos-U version info:\n");
+  printf("\tArch:       v%u.%u.%u\n",
         hw_info.version.arch_major_rev,
         hw_info.version.arch_minor_rev,
         hw_info.version.arch_patch_rev);
-  info("\tDriver:     v%u.%u.%u\n",
+  printf("\tDriver:     v%u.%u.%u\n",
         driver_version.major,
         driver_version.minor,
         driver_version.patch);
-  info("\tMACs/cc:    %u\n", (uint32_t)(1 << hw_info.cfg.macs_per_cc));
-  info("\tCmd stream: v%u\n", hw_info.cfg.cmd_stream_version);
+  printf("\tMACs/cc:    %u\n", (uint32_t)(1 << hw_info.cfg.macs_per_cc));
+  printf("\tCmd stream: v%u\n", hw_info.cfg.cmd_stream_version);
 
   return 0;
 }
